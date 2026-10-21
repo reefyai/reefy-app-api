@@ -3,7 +3,7 @@ name: Build reefy-app-api image
 on:
   push:
     branches:
-      - main
+      - '**'
   pull_request:
   workflow_dispatch:
 
@@ -36,6 +36,7 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
+          pull: true
           context: .
           file: Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
@@ -44,7 +45,7 @@ jobs:
           # tracks the branch tip.
           tags: |
             ghcr.io/reefyai/reefy-app-api:${{ steps.sha.outputs.short }}
-            ghcr.io/reefyai/reefy-app-api:main
+            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/reefyai/reefy-app-api:main' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
