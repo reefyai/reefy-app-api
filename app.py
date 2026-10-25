@@ -13,6 +13,7 @@ no device certs of its own.
 """
 import glob
 import os
+import re
 import secrets
 import threading
 import time
@@ -91,7 +92,7 @@ def _rate_ok(instance_uuid: str) -> bool:
     return True
 
 
-def create_app(publish=varlink_pub.publish) -> Flask:
+def create_app(publish=varlink_pub.publish, catalog_request=varlink_pub.catalog_request) -> Flask:
     """`publish` is injectable so tests can run without the control socket."""
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = MAX_ATTACH_BYTES + _BODY_OVERHEAD
@@ -110,6 +111,45 @@ def create_app(publish=varlink_pub.publish) -> Flask:
     @app.get('/healthz')
     def healthz():
         return jsonify(ok=True)
+
+    @app.route('/v1/catalog/publications', methods=['POST'])
+    @app.route('/v1/catalog/publications/<request_id>', methods=['GET'])
+    def catalog_publication(request_id=None):
+        claims = _claims()
+        if not claims or not isinstance(claims.get('iid'), str):
+            return jsonify(error='authentication_required', message='Reefy authorization required'), 401
+        if 'catalog:publish' not in (claims.get('caps') or []):
+            return jsonify(error='insufficient_scope', message='App lacks catalog publication permission'), 403
+        if request.content_length and request.content_length > 64 * 1024:
+            return jsonify(error='payload_too_large', message='Publication is too large'), 413
+        if request.method == 'POST':
+            body = request.get_json(silent=True)
+            if (not isinstance(body, dict) or set(body) - {'request_id','manifest','app_id'}
+                    or not isinstance(body.get('manifest'), dict)):
+                return jsonify(error='invalid_request', message='Invalid publication'), 400
+            request_id = body.get('request_id')
+            payload = dict(body, action='publish')
+        else:
+            payload = {'request_id':request_id, 'action':'status'}
+        if not isinstance(request_id, str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}', request_id):
+            return jsonify(error='invalid_request', message='Invalid request identity'), 400
+        payload['instance_uuid'] = claims['iid']
+        try:
+            result = catalog_request(payload)
+        except Exception:
+            return jsonify(error='temporarily_unavailable', message='Publication outcome unavailable; retry the same request'), 503
+        errors = {'not_found':404, 'conflict':409, 'invalid_request':400,
+                  'insufficient_scope':403, 'temporarily_unavailable':503,
+                  'private_app_limit_reached':409}
+        if isinstance(result, dict) and result.get('error') in errors:
+            code = result['error']
+            messages = {'not_found':'Publication unavailable',
+                        'private_app_limit_reached':'You can have up to 100 private apps per account.'}
+            return jsonify(error=code, message=messages.get(code,code)), errors[code]
+        if (not isinstance(result, dict) or set(result) != {'app_id','release_id','version'}
+                or not all(isinstance(v,str) and v for v in result.values())):
+            return jsonify(error='temporarily_unavailable', message='Publication outcome unavailable; retry the same request'), 503
+        return jsonify(result)
 
     @app.post('/v1/notify')
     def notify():
