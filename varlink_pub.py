@@ -42,3 +42,23 @@ def publish(suffix: str, payload: dict, timeout: float = 15.0) -> None:
     params = resp.get('parameters', {})
     if not params.get('ok', False):
         raise RuntimeError(params.get('error') or 'publish failed')
+
+
+def catalog_request(payload: dict) -> dict:
+    """Wait for backend commit, not the MQTT send acknowledgement."""
+    req = json.dumps({'method':'io.reefy.Control.CatalogRequest',
+                      'parameters':{'payload':json.dumps(payload)}}).encode() + b'\x00'
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+        stream.settimeout(16)
+        stream.connect(CONTROL_SOCK)
+        stream.sendall(req)
+        result = bytearray()
+        while not result.endswith(b'\x00'):
+            chunk = stream.recv(4096)
+            if not chunk or len(result) + len(chunk) > 64 * 1024:
+                raise RuntimeError('catalog_reply_unavailable')
+            result.extend(chunk)
+    response = json.loads(result.rstrip(b'\x00'))
+    if response.get('error'):
+        raise RuntimeError('catalog_transport_unavailable')
+    return json.loads(response['parameters']['result'])
